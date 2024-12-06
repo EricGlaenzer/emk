@@ -2,7 +2,8 @@ from __future__ import print_function
 
 import os
 import sys
-import imp
+import importlib.util
+
 if sys.version_info[0] < 3:
     _string_type = basestring
     import __builtin__ as builtins
@@ -14,7 +15,7 @@ import collections
 import errno
 import traceback
 import time
-import cPickle as pickle
+import pickle
 import threading
 import shutil
 import multiprocessing
@@ -476,7 +477,7 @@ class _WindowsOutputHandler(logging.StreamHandler):
         except IOError:
             pass
 
-        self.r = re.compile("\033\[([0-9]+)m")
+        self.r = re.compile(r"\033\[([0-9]+)m")
         self._default_style = 0x07
         
     def _get_style(self, current_style, ansi_code):
@@ -589,7 +590,10 @@ def _filter_stack(stack):
     return new_stack
 
 def _format_stack(stack):
-    return ["%s line %s, in %s: '%s'" % item for item in stack]
+    return ["%s line %s, in %s: '%s'" % (item[0] if len(item) > 0 else 'Unknown', 
+                                          item[1] if len(item) > 1 else '?', 
+                                          item[2] if len(item) > 2 else 'Unknown', 
+                                          item[3] if len(item) > 3 else '') for item in stack]
 
 def _format_decorator_stack(stack):
     if not stack:
@@ -780,27 +784,36 @@ class EMK_Base(object):
         fixed_paths = [_make_target_abspath(path, self.scope) for path in _flatten_gen(paths)]
 
         oldpath = os.getcwd()
-        fp = None
         try:
-            fp, pathname, description = imp.find_module(name, fixed_paths)
-            mpath = os.path.realpath(pathname)
-            d, tail = os.path.split(mpath)
-            os.chdir(d)
-            if description[2] == imp.PY_COMPILED and not os.path.isfile(name + ".py"):
-                raise ImportError("No matching .py")
-            if set_scope_dir:
-                self.scope.dir = d
-            return imp.load_module(name, fp, pathname, description)
+            for path in fixed_paths:
+                spec = importlib.util.spec_from_file_location(name, os.path.join(path, name + '.py'))
+                if spec is not None:
+                    mpath = os.path.realpath(spec.origin)
+                    d, tail = os.path.split(mpath)
+                    os.chdir(d)
+
+                    if not os.path.isfile(name + ".py"):
+                        raise ImportError("No matching .py")
+
+                    if set_scope_dir:
+                        self.scope.dir = d
+
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    return module
+
+            self.log.info("Could not import '%s' from %s", name, fixed_paths)
+            return None
+
         except ImportError:
             self.log.info("Could not import '%s' from %s", name, fixed_paths)
         except _BuildError:
             raise
         except Exception as e:
-            raise _BuildError("Error importing '%s' from %s" % (name, fixed_paths), _get_exception_info())
+            raise _BuildError(f"Error importing '{name}' from {fixed_paths}", _get_exception_info())
         finally:
             os.chdir(oldpath)
-            if fp:
-                fp.close()
+
         return None
     
     def _get_target(self, path, create_new=False):
@@ -985,7 +998,7 @@ class EMK_Base(object):
     def _setup_rule_cache(self, rule):
         paths = [t.abs_path for t in rule.produces]
         paths.sort()
-        rule._key = key = hashlib.md5('\0'.join(paths)).hexdigest()
+        rule._key = key = hashlib.md5('\0'.join(paths).encode(encoding = 'UTF-8', errors = 'strict')).hexdigest()
         cache = rule.scope._cache.setdefault("rules", {}).setdefault(key, {})
         rule._cache = cache
     
@@ -1397,7 +1410,7 @@ class EMK_Base(object):
     
     def _load_scope_cache(self, scope):
         if not self.cleaning:
-            hash = hashlib.md5(scope.dir).hexdigest()
+            hash = hashlib.md5(scope.dir.encode(encoding = 'UTF-8', errors = 'strict')).hexdigest()
             cache_path = os.path.join(scope.dir, scope.build_dir, "__emk_cache__" + hash)
             try:
                 with open(cache_path, "rb") as f:
@@ -1417,7 +1430,7 @@ class EMK_Base(object):
         if self.cleaning:
             return
         for path, scope in self._visited_dirs.items():
-            hash = hashlib.md5(path).hexdigest()
+            hash = hashlib.md5(path.encode(encoding = 'UTF-8', errors = 'strict')).hexdigest()
             cache_path = os.path.join(path, scope.build_dir, "__emk_cache__" + hash)
             if scope._cache:
                 try:
@@ -1518,7 +1531,7 @@ class EMK_Base(object):
                 except _BuildError:
                     raise
                 except Exception:
-                    raise _BuildError("Error creating new scope for module %s" % (name), _get_exception_info())
+                    raise _BuildError(f"Error creating new scope for module {name}", _get_exception_info())
 
                 mod = _Module_Instance(name, instance, d[name].mod)
                 _try_call_method(mod, "load_" + self.scope_name)
@@ -1531,35 +1544,38 @@ class EMK_Base(object):
 
         # otherwise, try to load the module from the module paths
         oldpath = os.getcwd()
-        fp = None
         try:
             fixed_module_paths = [_make_target_abspath(path, self.scope) for path in self.scope.module_paths]
             self.log.debug("Trying to load module %s from %s", name, fixed_module_paths)
-            fp, pathname, description = imp.find_module(name, fixed_module_paths)
-            mpath = os.path.realpath(pathname)
-            if not mpath in self._all_loaded_modules:
-                d, tail = os.path.split(mpath)
-                os.chdir(d)
-                self._all_loaded_modules[mpath] = imp.load_module(name, fp, pathname, description)
+            
+            for path in fixed_module_paths:
+                spec = importlib.util.spec_from_file_location(name, os.path.join(path, name + '.py'))
+                if spec is not None:
+                    mpath = os.path.realpath(spec.origin)
+                    if mpath not in self._all_loaded_modules:
+                        d, _ = os.path.split(mpath)
+                        os.chdir(d)
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                        self._all_loaded_modules[mpath] = module
 
-            instance = self._all_loaded_modules[mpath].Module(self.scope_name)
-            mod = _Module_Instance(name, instance, self._all_loaded_modules[mpath])
-            _try_call_method(mod, "load_" + self.scope_name)
-            if weak:
-                self.scope.weak_modules[name] = mod
-            else:
-                self.scope.modules[name] = mod
-            return instance
+                    instance = self._all_loaded_modules[mpath].Module(self.scope_name)
+                    mod = _Module_Instance(name, instance, self._all_loaded_modules[mpath])
+                    _try_call_method(mod, "load_" + self.scope_name)
+                    if weak:
+                        self.scope.weak_modules[name] = mod
+                    else:
+                        self.scope.modules[name] = mod
+                    return instance
+
         except ImportError:
             pass
         except _BuildError:
             raise
         except Exception:
-            raise _BuildError("Error loading module %s" % (name), _get_exception_info())
+            raise _BuildError(f"Error loading module {name}", _get_exception_info())
         finally:
             os.chdir(oldpath)
-            if fp:
-                fp.close()
 
         self.log.info("Module %s not found", name)
         return None
@@ -1942,7 +1958,7 @@ class EMK(EMK_Base):
         """
         Import a Python module from a set of search directories.
         
-        Finds the module in the given search directories using imp.find_module(). If found, emk will change
+        Finds the module in the given search directories using importlib.util.spec_from_file_location(). If found, emk will change
         the working directory to the directory that the module was found in, import the module, and then
         return the working directory to its original state. If the module is not found, no error is raised,
         but None will be returned.

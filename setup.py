@@ -58,11 +58,11 @@ def install():
             print("emk directory already in PATH")
     else:
         bin_path = os.path.join(emk_dir, "emk")
-        if os.path.exists("/usr/bin/emk"):
-            print("/usr/bin/emk already exists; will not overwrite.")
+        if os.path.exists("/usr/local/bin/emk"):
+            print("/usr/local/bin/emk already exists; will not overwrite.")
         else:
-            os.symlink(os.path.join(emk_dir, "emk"), "/usr/bin/emk")
-            print("Created symlink /usr/bin/emk -> %s" % (bin_path))
+            os.symlink(os.path.join(emk_dir, "emk"), "/usr/local/bin/emk")
+            print("Created symlink /usr/local/bin/emk -> %s" % (bin_path))
 
 def uninstall():
     emk_dir, tail = os.path.split(emk._module_path)
@@ -76,13 +76,13 @@ def uninstall():
     else:
         bin_path = os.path.join(emk_dir, "emk")
         try:
-            if os.readlink("/usr/bin/emk") == bin_path:
-                os.remove("/usr/bin/emk")
-                print("Removed /usr/bin/emk")
+            if os.readlink("/usr/local/bin/emk") == bin_path:
+                os.remove("/usr/local/bin/emk")
+                print("Removed /usr/local/bin/emk")
                 return
         except OSError:
             pass
-        print("/usr/bin/emk is not a symlink, or does not point to this instance of emk (%s)" % (bin_path))
+        print("/usr/local/bin/emk is not a symlink, or does not point to this instance of emk (%s)" % (bin_path))
 
 if len(sys.argv) != 2:
     usage()
